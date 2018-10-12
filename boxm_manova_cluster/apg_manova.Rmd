@@ -1,0 +1,97 @@
+---
+title: "Box-M, MANOVA, Clustering"
+author: "Kelompok 3KS1"
+date: "May 24, 2018"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+source('basic_function2.R')
+my_data <- read.csv('manova2_test.csv')
+my_data$pend_krt <- as.factor(my_data$pend_krt)
+my_data$jumlah_art <- as.factor(my_data$jumlah_art)
+```
+
+## Anggota
+Fachrudin Mansyur (15.8606)  
+Mahendri Dwicahyo (15.8727)  
+Nur Azizah W (15.8795)  
+Satria Bagus P (15.8887)  
+
+## Pendahuluan
+Data yang digunakan adalah data PKL 57 dengan variablel sebagai berikut: Variabel respon yang digunakan adalah pendapatan dan pengeluaran, variabel faktor yang digunakan pendidikan KRT dan jumlah ART.
+
+Hubungan yang diasumsikan akan terjadi adalah pendidikan dapat mempengaruhi jenis pekerjaan yang dimiliki, karena beberapa pekerjaan mensyaratkan minimal jenjang sekolah. Jumlah ART berpengaruh terhadap jumlah kebutuhan total pada setiap rumah tangga yang secara langsung mempengaruhi pengeluaran RT.
+
+## Tabel data
+```{r echo=FALSE, results='asis'}
+library(knitr)
+kable(my_data[1:5,])
+```
+
+Pendidikan KRT 1:SD/Sederajat ke bawah, 2:SMP, 3:SMA/Sederajat ke atas  
+Jumlah ART 1: 4 ke bawah, 2: 5 ke atas
+
+## Uji Asumsi Kesamaan Matriks Kovarian
+Menggunakan Box-M, kita uji matriks kovarian variabel respon dari tiga tingkat populasi pendidikan KRT
+```{r}
+box.m_result <- box_m(my_data, c('penerimaan', 'pengeluaran'), my_data$pend_krt)
+```
+Berdasarkan hasil tersebut tolak H0, artinya antara ketiga populasi tersebut mempunyai matriks kovarian yang tidak sama sehingga tidak memenuhi asumsi dari uji perbedaan rata-rata
+
+## Uji ANOVA 2 Arah
+Anova dua arah digunakan pada kelompok yang digunakan berasal dari sampel yang sama tiap kelompok.sama diartikan berasal dari kategori yang sama. Jadi, bisa disimpulkan Pertama yang perlu dilihat tujuannya membandingkan rata-rata kelompok lebih dari dua. Kedua Sampel yang digunakan merupakan sampel yang sudah dikategorikan per kelompok sama.
+
+
+Asumsi-asumsi yang harus dipenuhi dalam analisis varians (anova):
+
+1. Data berdistribusi normal,
+2. Varians atau ragamnya homogen, dikenal sebagai homoskedastisitas, karena hanya digunakan satu penduga (estimate) untuk varians dalam contoh
+3. Masing-masing contoh saling bebas,
+
+
+```{r}
+anova_result <- twoway_anova(my_data$pengeluaran, my_data$pend_krt,
+                             my_data$jumlah_art, 0.05)
+```
+Kesimpulan: dengan tingkat signifikansi 0.05 tidak ada cukup bukti untuk mengatakan bahwa terdapat efek perbedaan Kabupaten Kaur dan Bengkulu Tengah, efek perbedaan Pendidikan Kepala Rumah Tangga, dan interaksi antara Kabupaten dan Pendidikan Kepala Rumah Tangga terhadap Pengeluaran masyarakatnya, 
+
+## Uji MANOVA 2 Arah
+```{r}
+manova_result <- twoway_manova(
+    my_data,
+    c('penerimaan', 'pengeluaran'),
+    my_data$pend_krt, my_data$jumlah_art
+)
+```
+Hasilnya interaksi gagal tolak H0, hal ini memungkinkan karena pendidikan KRT tidak menyebabkan KRT berkeinginan mempunyai banyak anggota keluarga. Tetapi faktor pendidikan KRT dan jumlah ART sesuai deskripsi awal memang terbukti memberikan dampak pada variabel respon, yaitu pengeluaran dan pendapatan RT
+
+## Clustering Data PKL
+Perlu diingat bahwa data yang dipakai hanya berjumlah sekitar 2000, karena untuk menyesuaikan ukuran sampel antar faktor. Dengan data yang diperoleh, kita bisa memanfaatkan untuk melihat pola konsumsi dari tiap RT. Apakah persebaran merata di tiap klaster, lalu bagaimana kondisi tiap kabupaten. Apakah di antara Kab Kaur, Bengkulu Tengah, atau Kota Bengkulu yang persebaran lebih condong ke satu sisi. Jumlah klaster dipilih 3 untuk melihat perbedaan yang jelas
+```{r}
+# load data PKL
+pkl_dat <- read.csv('cluster_pkl.csv')
+scale_var <- c('penerimaan', 'pengeluaran', 'jumlah_art')
+# scale variable untuk mempercepat optimisasi
+pkl_scale <- scale(pkl_dat[,scale_var])
+# pilih random init 100 untuk menemukan centroid terbaik
+set.seed(123)
+clusters <- kmeans(pkl_scale, 3, iter.max = 100, nstart = 100)
+pkl_dat$cluster <- as.factor(clusters$cluster)
+```
+
+```{r}
+aggregate(pkl_dat[,c('penerimaan','pengeluaran', 'jumlah_art')], list(pkl_dat$cluster), mean)
+```
+Berdasarkan summary di atas maka dapat diketahui bahwa klaster 1 merupakan klaster dengan penerimaan dan pengeluaran terendah beserta jumlah ART antara 2 dan 3. Klaster 2 merupakan klaster dimana pendapatan pengeluaran tidak jauh berbeda dari klaster 1 tetapi jumlah ART lebih banyak 2 dibanding klaster 1. Klaster 3 merupakan klaster dengan penerimaan dan pengeluaran yang berbeda jauh dibandingkan klaster 1 dan 2 dengan jumlah ART yang relatif sama dengan klaster 2.
+
+Klaster 2 merupakan satu klaster yang tidak mengikuti trend pada data. Jumlah ART sebanding dengan klaster 3 yang memiliki penerimaan dan pengeluaran yang berlipat kali lebih banyak. Perlu dilihat lagi dari klaster 2 apakah dengan penerimaan dan pengeluaran seperti itu sudah dapat memenuhi kebutuhan hidup layak
+```{r}
+ftable(table(pkl_dat$kab, pkl_dat$cluster))
+```
+Bengkulu tengah merupakan kabupaten dengan jumlah klaster 2 yang tidak sebanding dengan klaster 1 (1.5 kali lebih banyak). Perlu dilihat apakah memang kemiskinan pada Bengkulu Tengah lebih tinggi dibanding Kaur dan Kota Bengkulu atau memang ada hal lain, misalnya harga barang lebih murah, bantuan pemerintah lebih banyak.

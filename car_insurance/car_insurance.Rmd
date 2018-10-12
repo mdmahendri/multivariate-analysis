@@ -1,0 +1,374 @@
+---
+title: "Predict Insurance Cold Calls, Another Approach"
+author: "Mahendri"
+output:
+  pdf_document: default
+  html_document:
+    code_folding: hide
+---
+
+## Welcome
+Why titled 'another approach' is because `NoOfContacts`, `CallStart`, and `CallEnd` will not be used. Both of `Call..` features refer to call that occured in current campaign (all of them), which in real world is not the case. What really we want to know is prediction before calls occur. See [Emma Ren's kernel](https://www.kaggle.com/emmaren/cold-calls-data-mining-and-model-selection) comment section to see more detail. The purpose of this kernel is to predict without knowing current campaign condition, only the labels.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('/storage/Code/r/apg')
+df <- read.csv('carInsurance_train.csv')
+```
+
+```{r lib_load, message=F}
+library(ggplot2)
+library(caret)
+```
+
+## Introduction
+Insurance industry always compete to get a new client in all services they had, for example car insurance. Industry often organize campaign to attract potential clients to buy their services, often spend money in the process. Randomly pick people can potentially waste money and time. In order to produce efficient results, it is necessary to know what trait will improve chance of client to buy the insurance.
+
+## Dataset
+Dataset comes from Data Mining Cup (SS 2017) of TU Munchen where it describe data originated from a Bank in the US. For description of each features see `DSS_DMC_Description.pdf` in Data tab. Next print structure of the data
+```{r str_dat}
+str(df)
+```
+
+From 18 features only `Age`, `NoOfContacts`, `DaysPassed`, `PrevAttempts` is of numeric type, the others is considered to be factor. Take a look to summary of the numeric features to understand max, min value the data has
+```{r summary}
+summary(df)
+```
+
+## Preprocess
+This section mainly involved in change structure of data or handle missing values. `Default`, `HHInsurance`, `CarLoan`, `LastContactDay`, `CarInsurance` are numeric, so need to convert it into factor
+```{r numeric_factor}
+df$Default <- as.factor(ifelse(df$Default == 0, 'No', 'Yes'))
+df$HHInsurance <- as.factor(ifelse(df$HHInsurance == 0, 'No', 'Yes'))
+df$CarLoan <- as.factor(ifelse(df$CarLoan == 0, 'No', 'Yes'))
+df$CarInsurance <- as.factor(ifelse(df$CarInsurance == 0, 'No', 'Yes'))
+df$LastContactDay <- factor(df$LastContactDay, levels = 1:31)
+```
+
+Another case is with `LastContactMonth`. Looking at the `str` of the data, the order of month is messed up so need to manually re-order it
+```{r sort_month}
+df$LastContactMonth <- factor(
+        df$LastContactMonth,
+        levels = c('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep',
+                   'oct', 'nov', 'dec')
+    )
+```
+
+`CallStart` and `CallEnd` is treated as factor, change it as POSIXct
+```{r conv_time}
+df$CallStart <- as.POSIXct(df$CallStart, format='%H:%M:%S')
+df$CallEnd <- as.POSIXct(df$CallEnd,format='%H:%M:%S')
+```
+
+Check missing values, if exist need to handle it
+```{r}
+colSums(apply(df, 2, is.na))
+```
+
+Data provider do not explicitly say anything about missing values, so explore all features that contain missing values and decide what action best to handle each features
+
+First, check on `Job`
+```{r na_job}
+unique(df$Job)
+```
+Job contain values like `retired` and `unemployed`, so assume that NA is really a missing value and need to remove it
+
+Second, on to `Education` feature
+```{r na_edu}
+unique(df$Education)
+```
+`Education` contain three levels of education and 169 missing values. But rather remove all missing values, prefer filling to some of it.
+
+Student with age more than 18 treat it as having tertiary education. As in the US, average age of freshman is 18-22 years old
+```{r na_edu_fill}
+df[!is.na(df$Job) & df$Job == 'student' & df$Age > 17
+      & is.na(df$Education),]$Education <- 'tertiary'
+```
+
+For management, services, admin. assume that minimum require diploma or bachelor's degree (according to US Bureau of Labor), so fill three jobs above with tertiary education. The rest of missing values need to be removed
+```{r na_edu_fill2}
+df[
+    !is.na(df$Job) & df$Job %in% c('management', 'services', 'admin.')
+    & is.na(df$Education),
+]$Education <- 'tertiary'
+```
+
+Continue to `Communication` feature
+```{r na_comm}
+unique(df$Communication)
+```
+
+Assume NA here mean that bank do not communicate with client using phone, so code it to no_comm
+```{r na_comm_fill}
+levels(df$Communication) <- c(levels(df$Communication), 'no_phone')
+df$Communication[is.na(df$Communication)] <- 'no_phone'
+```
+
+Check on the last feature that has NA `Outcome`
+```{r na_outcome}
+table(df$Outcome)
+```
+
+The number of missing values is high, approximately only a quarter have values, but do not remove it and address it in feature engineering
+
+After check on each feature, remove row that still contain NA in Job and Education, but exclude `Outcome` as it will be addressed later
+```{r na_rm}
+complete_index <- complete.cases(df[, c('Job', 'Education')])
+df <- df[complete_index,]
+```
+
+In the end from the data, 3894 row can be used. That number is much better rather than deleting all NA in communication and education
+
+## Data Visualization
+Skip the correlation plot, as the data donimated by categorical features. Plot bar chart between features and label to see how each of features affect label
+
+```{r plot_Job}
+ggplot(data = df, mapping = aes(x = Job, fill = CarInsurance)) +
+    geom_bar(position = 'fill') +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0))
+```
+
+student, retired, and unemployed have chance to buy insurance more than 0.5, it can be an indication that people that do not work will have higher chance of buying. While the others have chance less than 0.5
+
+```{r plot_Marital}
+ggplot(data = df, mapping = aes(x = Marital, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+In marital status, married person has less percentage in buying insurance so it is save while divorced or single having higher percentage. It could be that not married person will more likely to buy insurance
+
+```{r plot_Edu}
+ggplot(data = df, mapping = aes(x = Education, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+People with tertiary education are more likely to buy insurance. Primary to seconday level saw negligible increase in chance. Based on this, feature can be make more simple
+
+```{r plot_Default}
+ggplot(data = df, mapping = aes(x = Default, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+People that have credit in default less likely to buy insurance. This could be interpreted that people have financial difficulty
+
+```{r plot_hhins}
+ggplot(data = df, mapping = aes(x = HHInsurance, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+Having household insurance make people less likely to buy insurance. The reason may people with HH insurance bought car insurance too when buying HH insurance.
+
+```{r plot_carloan}
+ggplot(data = df, mapping = aes(x = CarLoan, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+As i thought, people that have car loan will less likely to buy car insurance. This might be to loan a car needed to buy insurance too for the loaned car.
+
+```{r plot_comm}
+ggplot(data = df, mapping = aes(x = Communication, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+Communicate with people that have cellular or telephone will have greater chance to success. Either cellular or telephone is fine, there is no significant difference. This might be used to simplify features.
+
+```{r plot_lastday}
+ggplot(data = df, mapping = aes(x = LastContactDay, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+There is no clear pattern here, it might be because difference in month or year make effect differ randomly.
+
+```{r plot_lastmonth}
+ggplot(data = df, mapping = aes(x = LastContactMonth, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+March, Sept, Oct, Dec are peak months where people will consider buying car insurance. This might have something to do with people searching another insurance option or from the effect of buying a new car (when in December)
+
+```{r plot_outcome}
+ggplot(data = df, mapping = aes(x = Outcome, fill = CarInsurance)) +
+    geom_bar(position = 'fill')
+```
+
+Outcome of previous campaign contribute largely to people decision to buy insurance. This result means that people satisfied with bank services so client decided to buy another services, which in this case is a car insurance.
+
+```{r plot_balance}
+ggplot(data = df, mapping = aes(x = Balance, y = CarInsurance)) +
+    geom_jitter()
+```
+
+Looks like balance does not determine whether people will buy insurance or not
+
+```{r plot_dayspass}
+ggplot(data = df, mapping = aes(x = DaysPassed, y = CarInsurance)) +
+    geom_jitter() +
+    scale_x_continuous(breaks = round(seq(-1, max(df$DaysPassed), 50))) +
+    geom_vline(mapping = aes(xintercept = 390, color = 'red'))
+```
+
+Days passed in previous campaign has influence in decision of buying insurance or not. After more than 390 days not called, client more likely to buy insurance. For the client that not called before, the plot is too dense need to have a count of it
+```{r}
+count1 <- table(df$CarInsurance[df$DaysPassed == -1])
+count1/sum(count1)
+```
+Seeing table above, people that not called before will more likely to reject offer from insurance call
+
+## Feature Engineering
+This section deals with action that proposed in previous section, mainly focus on creating or recode features.
+
+`Outcome` is first that should be handled. After seeing outcome plot, it is reasonable then to group outcome into success or not success. Included in not success is other, failure, and NA
+```{r eng_outcome}
+df$PrevSuccess <- as.factor(
+    ifelse(df$Outcome != 'success' | is.na(df$Outcome), 'No', 'Yes')
+)
+```
+
+Move on to `Job`, as described on plot above, it might good to try create a new feature based on working or not working condition
+```{r eng_job}
+df$NoWork <- as.factor(
+    ifelse(df$Job %in% c('student', 'retired', 'unemployed'), 'Yes', 'No')
+)
+```
+
+`Marital` status can also be used as basis to create a new feature, indicator of married or not. Divorced or single will become one group
+```{r eng_marital}
+df$NotMarried <- as.factor(
+    ifelse(df$Marital %in% c('divorced', 'single'), 'Yes', 'No')
+)
+```
+
+`Education` will be simplified into tertiary or not tertiary
+```{r eng_edu}
+df$Tertiary <- as.factor(ifelse(df$Education == 'tertiary', 'Yes', 'No'))
+```
+
+Next is `Communication`, plot of communication shows that grouping cellular and telephone as one might reasonable as difference between them is small
+```{r eng_comm}
+df$CommPhone <- as.factor(ifelse(df$Communication == 'no_phone', 'No', 'Yes'))
+```
+
+Last come from `DaysPassed`, where it will become basis for two new features. First is indicator whether 390 days has passed since last contact from a previous campaign. Second is indicator whether client was contacted in a previous campaign.
+```{r eng_dayspass}
+df$More390 <- as.factor(ifelse(df$DaysPassed >= 390, 'Yes', 'No'))
+df$NoPrev <- as.factor(ifelse(df$DaysPassed == -1, 'Yes', 'No'))
+```
+
+## Feature Selection
+This section's aim is to remove some of features that is used in feature engineering. Features that do not group effciently will be removed. For example where one group from another is only differ slightly. The reason for this is to prevent overfitting and build features that only contain high information (split of tree algorithm will be more decisive)
+
+The obvious feature that will be removed is `ID`
+```{r sel_id}
+df$Id <- NULL
+```
+
+`Outcome` will be removed because other factor than success is minimal in difference. `Marital`, `Education`, `Communication` removed from the same reason. `DaysPassed` is already encoded into two different features, so consider the information already extracted and remove it. `LastContactDay` will be removed too because the pattern is not visible at all and do not know which year it belong is make the day not valid to use for analysis
+```{r sel_feature}
+df$Outcome <- NULL
+df$Marital <- NULL
+df$Education <- NULL
+df$Communication <- NULL
+df$DaysPassed <- NULL
+df$LastContactDay <- NULL
+```
+
+From the intro of this kernel, the aim of this kernel is to provide another approach/perspective without using current condition. What will be removed is `NoOfContacts`, `CallStart`, and `CallEnd`
+```{r sel_aim}
+df$NoOfContacts <- NULL
+df$CallStart <- NULL
+df$CallEnd <- NULL
+df$Job <- NULL
+```
+
+Now, final features are already assembled so split the train and test set into 8:2 ratio
+```{r split_train_test}
+set.seed(10)
+train_idx <- createDataPartition(y = df$CarInsurance, p = .8, list = F, times = 1)
+train_dat <- df[train_idx,]
+test_dat <- df[-train_idx,]
+```
+
+## Model the Data
+Modeling algorithm that will be used is logistic regression, random forest, and XGB
+
+### 1. Logistic Regression
+```{r fit_lr}
+fit_ctrl <- trainControl(method = 'cv', number = 5)
+
+lr_fit <- train(
+        form = CarInsurance ~ ., data = train_dat,
+        method = 'glm', metric = 'Kappa',
+        trControl = fit_ctrl
+    )
+
+confusionMatrix(predict(lr_fit, test_dat), test_dat$CarInsurance)
+```
+
+### 2. Random Forest
+```{r fit_rf}
+rf_grid <- expand.grid(mtry = c(3, 5, 7))
+
+rf_fit <- train(
+        form = CarInsurance ~ ., data = train_dat,
+        method = 'rf',
+        trControl = fit_ctrl,
+        tuneGrid = rf_grid,
+        metric = 'Kappa'
+    )
+
+confusionMatrix(predict(rf_fit, test_dat), test_dat$CarInsurance)
+```
+
+### 3. XGB
+```{r fit_xgb}
+xgb_grid <- expand.grid(
+        nrounds = 800,
+        max_depth = 4,
+        eta = 0.01,
+        gamma = 0.5,
+        colsample_bytree = 0.8,
+        min_child_weight = 0.8,
+        subsample = 0.8
+    )
+
+xgb_fit <- train(
+        form = CarInsurance ~ ., data = train_dat,
+        method = 'xgbTree', nthread = 8,
+        trControl = trainControl(method = 'none'),
+        tuneGrid = xgb_grid,
+        metric = 'Kappa'
+    )
+xgb_imp <- varImp(xgb_fit)
+confusionMatrix(predict(xgb_fit, test_dat), test_dat$CarInsurance)
+```
+
+
+According to the results on three algorithms, Random Forest outperform logistic regression and XGB. Although for XGB, i try to balance between overfitting and underfitting and seems can reach the level of Random Forest
+
+
+## Top Important Feature
+Let see which features is important for each of algorithms
+
+### 1. Logistic Regression
+```{r lr_imp}
+lr_imp <- varImp(lr_fit)$importance
+lr_imp <- data.frame(Feature = rownames(lr_imp), Importance = lr_imp$Overall)
+head(lr_imp[order(lr_imp$Importance, decreasing = T),], n = 10)
+```
+
+### 2. Random Forest
+```{r rf_imp}
+rf_imp <- varImp(rf_fit)$importance
+rf_imp <- data.frame(Feature = rownames(rf_imp), Importance = rf_imp$Overall)
+head(rf_imp[order(rf_imp$Importance, decreasing = T),], n = 10)
+```
+
+### 3. XGB
+```{r xgb_imp}
+xgb_imp <- varImp(xgb_fit)$importance
+xgb_imp <- data.frame(Feature = rownames(xgb_imp), Importance = xgb_imp$Overall)
+head(xgb_imp[order(xgb_imp$Importance, decreasing = T),], n = 10)
+```
+
+
+There is some degree of agreement between model, `PrevSuccess`, `CommPhone`, `HHInsurance` are features that placed in top 10 in all three models. Without current campaign's condition, we can still predict at least 75% accurate.

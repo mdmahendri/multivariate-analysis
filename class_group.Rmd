@@ -1,0 +1,303 @@
+---
+title: "Predict Quality of Red Wine"
+output:
+    html_document:
+        code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(corrplot)
+
+library(car) #vif
+library(mvtnorm) #manova
+
+library(caret)
+library(xgboost) #need to see iter that maximize 
+library(hmeasure)
+
+setwd('/storage/Code/r/apg')
+df <- read.csv('winequality-red.csv')
+```
+
+*Lecture: Setia Pramana*
+
+### Group 1
+
+*Aristolanika - 15.8526*  
+*Fachruddin Mansyur - 15.8606*  
+*Mahendri Dwicahyo - 15.8727*  
+*Nur Azizah Widowati - 15.8795*  
+*Satria Bagus Panuntun - 15.8887*  
+
+#### **Politeknik Statistika STIS**
+
+
+### Dataset
+Dataset is from Portuguese *vinho verde* red variant of wine
+```{r str}
+str(df)
+```
+
+Let see summary of the data
+```{r summary}
+summary(df)
+```
+
+Check if missing values exist in dataset
+```{r check_na}
+colSums(apply(df, 2, is.na))
+```
+No missing values in each of features used, proceed to data visualization
+
+### Visualize the Data
+How does the distribution of `quality` look like
+```{r qualplot}
+ggplot(data = df) + geom_bar(mapping = aes(x = quality))
+```
+Quality of wine is concentrated on 5 and 6, so let assume that must be the normal wine. Bad wine is on quality 3 and 4, while premium quality of wine is on 7 and 8.
+It is reasonable then to set threshold to be 6.5 to differentiate between premium and not premium. The value of threshold is an arbitrary decision based on `quality` plot
+```{r code_label}
+df$qlabel <- cut(df$quality, breaks = c(0, 6.5, 10), labels = c('No', 'Yes'))
+dim(df)
+```
+
+Let see correlations of each features that might have
+```{r corr_plot, echo=F}
+cor_var <- cor(df[,-13])
+corrplot.mixed(corr = cor_var, tl.pos = 'lt')
+```
+Correlation plot might indicate there are collinearity. Collinearity can cause coefficients found on model (for example logistic regression) not stable, easily change. As effect of that, interpretation of model might not be valid. Test if that is really the case using VIF.  
+
+Continue to see how each features affect the quality of wine
+```{r plot_effect}
+df$quality <- as.factor(df$quality) #to see all quality labels
+for (variable in colnames(df[,-c(1, 12, 13)])) {
+    plot <- ggplot(
+            data = df,
+            mapping = aes_string(x = 'quality', y = variable)
+        ) + stat_summary(fun.y = mean, geom = 'bar') + coord_flip()
+    
+    print(plot)
+}
+```
+**From the plot above here are some findings and what actions needed:**  
+- `residual.sugar`, `density`, do not appear have any variance and trend, might consider them constant and drop them. But just to be sure, test with MANOVA  
+- `volatile.acidity`, `chlorides`, `pH` have adverse effect on quality  
+- `citric.acid`, `sulphates`, `alcohol` have positive effect on quality  
+- `free.sulfur.dioxide`, `total.sulfur.dioxide` have weird relationships on quality, plot seems to suggest that having lot of two components above will produce normal quality while small can lead to either premium or poor quality. There is a need to search for what sulfur dioxide do in process of making wine  
+
+### Feature Engineering
+Continue from before, after reading [Santa Rosa article](http://srjcstaff.santarosa.edu/~jhenderson/SO2.pdf) now the relationship of `pH` and `free.sulfur.dioxide` is clear. If there is not enough $SO_2$ in wine then quality will deteriorate and higher `pH` require more `free.sulfur.dioxide`. Build a new feature based on this knowledge using molecular $SO_2$ formula. 
+```{r}
+df$mso2 <- df$free.sulfur.dioxide / (1 + 10^(df$pH - 1.81))
+ggplot(
+        data = df,
+        mapping = aes(x = quality, y = mso2)
+    ) + stat_summary(fun.y = mean, geom = 'bar') + coord_flip()
+```
+New feature is named `mso2`. Plot now appear reasonable, poor quality of wine in have lower $SO_2$ so that is why quality degraded. Normal and premium have higher `mso2` and indeed acceptable level of `mso2` for red wine is between 0.4 and 0.6  
+
+That is all, as knowledge on wine is minimum continue on feature selection 
+
+### Feature Selection
+Before doing another selections, remove `free.sulfur.dioxide` as it does not needed anymore. The number of free $SO_2$ by it self does not help, only interaction between `pH` which resulted in `mso2` useful
+```{r rm_so2}
+df <- df[, -6]
+```
+
+As promised on above, it is time to do VIF test on possibility of collinearity
+```{r vif}
+mod_test <- glm(
+    qlabel ~ ., data = df[,-9],
+    family = 'binomial', maxit = 100)
+vif(mod_test)
+```
+`fixed.acidity` have VIF higher than 4 which indicate collinearity. One way to deal with collinearity is removing features responsible for collinearity.  
+
+Looking at the correlation plot, `fixed.acidity` have high correlations with `citric.acid`, `density`, `pH`. Removal of `fixed.acidity` should not become a problem as acidity will represented by `pH`. Run again VIF to see the result
+```{r vif2}
+df <- df[,-1]
+mod_test <- glm(
+    qlabel ~ ., data = df[,-9], family = 'binomial', maxit = 500)
+vif(mod_test)
+```
+No VIF values higher than four, so no need to take another action for collinearity. Remember that, collinearity only slightly affect the model's accuracy  
+
+Next, continue on MANOVA test on features that considered to be constant/small variance. MANOVA test if there is an association between `quality` and  dependent (`residual.sugar`, `density`)
+```{r}
+manrslt <- manova(cbind(1/(residual.sugar), density) ~ quality, data = df)
+summary(manrslt, test = 'Wilks')
+```
+MANOVA produces significant result, p-value is so small. There is exist an association between independent and dependent variable, can not remove the both two features.
+
+Finally, ready to model the data. What needed now is remove the original `quality` score
+```{r rm_quality}
+df$quality <- NULL
+knitr::kable(head(df))
+```
+
+Split data into 8:2 for train and test set
+```{r split_dat}
+set.seed(123)
+train_idx <- createDataPartition(y = df$qlabel, p = .8, list = F, times = 1)
+train_dat <- df[train_idx,]
+test_dat <- df[-train_idx,]
+```
+
+### Model the Data
+Remember that data is imbalanced, rather than using Accuracy choose Kappa because it designed to handle imbalance. Model that will be used are follow:  
+1. Logistic Regression  
+2. SVM - RBF Kernel  
+3. KNN  
+4. Random Forest  
+5. XGB  
+
+#### 1. Logistic Regression
+```{r lr}
+fit_ctrl <- trainControl(method = 'cv', number = 5, classProbs = TRUE)
+
+lr_fit <- train(
+        form = qlabel ~ ., data = train_dat,
+        method = 'glm', metric = 'Kappa',
+        trControl = fit_ctrl
+    )
+
+lr_prob <- predict(lr_fit, test_dat, type = 'prob')
+```
+
+#### 2. SVM - RBF Kernel
+```{r svm}
+svm_fit <- train(
+        form = qlabel ~ ., data = train_dat,
+        method = 'svmRadial',
+        trControl = fit_ctrl,
+        preProcess = c('center', 'scale'),
+        metric = 'Kappa'
+    )
+
+svm_prob <- predict(svm_fit, test_dat, type = 'prob')
+```
+
+#### 3.KNN
+```{r knn}
+knn_grid <- expand.grid(k = 1:5)
+
+knn_fit <- train(
+        form = qlabel ~ ., data = train_dat,
+        method = 'knn',
+        trControl = fit_ctrl,
+        preProcess = c('center', 'scale'),
+        tuneGrid = knn_grid,
+        metric = 'Kappa'
+    )
+
+knn_prob <- predict(knn_fit, test_dat, type = 'prob')
+```
+
+#### 4.Random Forest
+```{r rf}
+rf_grid <- expand.grid(mtry = c(2, 3, 5, 7))
+
+rf_fit <- train(
+        form = qlabel ~ ., data = train_dat,
+        method = 'rf',
+        trControl = fit_ctrl,
+        tuneGrid = rf_grid,
+        metric = 'Kappa'
+    )
+
+rf_prob <- predict(rf_fit, test_dat, type = 'prob')
+```
+
+#### 5. XGB
+Try different XGB hyperparameter, after found best params then continue to use `xgb.cv`. The goal is to search which iteration have best score
+```{r xgb}
+train_mtx <- xgb.DMatrix(data = as.matrix(train_dat[,-10]),
+                         label = ifelse(train_dat$qlabel == 'Yes', 1, 0))
+
+gb_cv <- xgb.cv(
+        data = train_mtx, eta = 0.008, max_depth = 4, nrounds = 2000, verbose = F,
+        nfold = 3, objective = 'binary:logistic', metrics = 'auc', nthread = 8,
+        subsample = 0.8, colsample_bytree = 0.8, gamma = 0.5
+    )
+
+# check iteration that produce best result
+best_iter <- as.integer(which.max(gb_cv$evaluation_log$test_auc_mean
+                       - gb_cv$evaluation_log$test_auc_std))
+
+xgb_grid <- expand.grid(
+        nrounds = best_iter,
+        max_depth = 4,
+        eta = 0.008,
+        gamma = 0.5,
+        colsample_bytree = 0.8,
+        min_child_weight = 1,
+        subsample = 0.8
+    )
+
+xgb_fit <- train(
+        form = qlabel ~ ., data = train_dat,
+        method = 'xgbTree', nthread = 8, seed = 123,
+        trControl = trainControl(method = 'none'),
+        tuneGrid = xgb_grid,
+        metric = 'Kappa'
+    )
+
+xgb_prob <- predict(xgb_fit, test_dat, type = 'prob')
+```
+### Select the Best Model
+Metrics used to evaluate model performance are PCC, BS, H-Measure, Gini, AUC, KS. Plot above shows that `quality` is imbalanced, so it is necessary to use other metrics besides accuracy.  
+- PCC is same as accuracy, PCC stands for Percentage of Correctly Classified. Favor model with higher PCC  
+- Brier Score (BS) measures mean squared difference between probability of outcomes and actual outcomes, favor model with smallest BS Score  
+- AUC refer to area under ROC curve, takes value between 0.5 and 1. Higher AUC result in better model performance  
+- Gini measures standardized value of AUC $Gini = 2AUC - 1$  
+- Kolmogorov-Smirnov (KS) measures maximum specifity and sensitivity, in ROC curve it refers to maximum vertical distance between curve and diagonal. Higher value means better model in separating positive and negative value  
+- H-Measure measures model performance to error which can penalizes `FP` and `FN` differently. But in this kernel, let just treat both equal. Prefer the model which has highest value  
+
+For BS and PCC define a new function, as it is not available in `hmeasure` package
+```{r bs_pcc_func}
+pcc_func <- function(hm_rslt) {
+    if (!is(hm_rslt, 'hmeasure')) {
+        stop('error: not a hmeasure object')
+    }
+    metrics <- hm_rslt$metrics
+    (metrics$TP + metrics$TN) / (metrics$TP + metrics$FP + metrics$TN + metrics$FN)
+}
+
+bs_func <- function(yes_prob, actual) {
+    if(!('Yes' == levels(actual)[2])) {
+        stop('Need yes no labels, set yes as second level')
+    }
+    
+    num_label <- ifelse(actual == 'Yes', 1, 0)
+    mean((yes_prob - num_label)^2)
+}
+```
+
+Calculate all metrics used
+```{r}
+prob_dat <- data.frame(
+        LR = lr_prob$Yes,
+        SVM_RBF = svm_prob$Yes,
+        KNN = knn_prob$Yes,
+        RF = rf_prob$Yes,
+        XGB = xgb_prob$Yes
+    )
+
+hm <- HMeasure(test_dat$qlabel, prob_dat, threshold = 0.5)
+hm$metrics$PCC <- pcc_func(hm)
+hm$metrics$BS <- apply(prob_dat, 2, function(prob) bs_func(prob, test_dat$qlabel))
+hm$metrics[c('PCC', 'BS', 'AUC', 'Gini', 'KS', 'H')]
+```
+According to the table, best model is Random Forest
+
+### Conclusions
+After know best model, check what features contribute more to prediction of premium quality of wine
+```{r}
+rf_imp <- varImp(rf_fit)$importance
+rf_imp
+```
+Percentage of alcohol is the utter importance for premium quality of red wine. While the new feature that created is contribute to model prediction as well. `mso2` is affecting model accuracy too, this is sign that feature engineering is a success.

@@ -1,0 +1,108 @@
+---
+title: "Country Data Analysis"
+author: "Mahendri Dwicahyo - 3KS1"
+date: "July 5, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(psych)
+library(GPArotation)
+library(CCA)
+library(CCP)
+
+setwd('/storage/Code/r/apg')
+df <- read.csv('CountryData.csv')
+```
+
+## Dataset
+Data comes from CIA factbook where it describe geographic, demographic, and economic condition on 256 country.
+
+```{r dat_struct}
+str(df)
+```
+
+## Preprocess
+As in this study use factor analysis (FA), getting stable estimate of correlations is important. Good estimate of correlations need a lot of sample, as a rule of thumb use sample size five times the number of variable used. In the step below, careful in removing NA both in row and columns to get ideal sample based on the rule of thumb. Turns out removing each columns with NA greater than 45 produce data with 188 observations and 35 variables, which satisfy the rule of thumb.
+
+```{r prep}
+count_na <- colSums(apply(df, 2, is.na))
+df <- df[,count_na < 45]
+cmp_index <- complete.cases(df[,colnames(df)])
+df <- df[cmp_index,]
+df <- df[, -c(1,2)]
+dim(df)
+```
+
+## Assumption Test
+Use KMO to check whether exist underlying common factors that may cause variations in the variables, if exist then FA can be used
+```{r kmo_test}
+KMO(cor(df))
+```
+Overall MSA is 0.79 which indicate that correlation matrix is factorable. As seen above, several variables have less than 0.5 MSAi so remove them
+```{r remove_kmo}
+df <- df[,!(colnames(df) %in% c('growth', 'death', 'migr', 'inflation', 'gasExp'))]
+```
+Another method to test whether FA can be used is Bartlett's test where it test if correlation matrix is identity matrix (no correlation between variable)
+
+## Factor Analysis
+Determine number of factor with eigen greater than 1. Note data is not standardized beforehand so use `scale` to obtain eigen of PCA
+```{r eigen}
+eig <- eigen(cov(scale(df)))
+sum(eig$values >= 1)
+```
+It is recommended to use 5 factors by looking at eigen of the data. Then do FA with data and use 5 factors with varimax rotation
+```{r fa}
+fa5 <- factanal(x = df, factors = 5, rotation = 'varimax', lower = 0.03)
+print(fa5$loadings, cutoff = 0.5, sort = T)
+```
+Five factors produce a model which explains 76.1% variance from data. Set cutoff 0.5 to group variable into any factor.
+
+1. Factor 1 related to pop, GDP, labor, exports, imports, elecProd, elecCons, elecCap, mainlines, cell, netUsers, roadways, petroProd  
+2. Factor 2 related to GDP, imports, roadways, elecImp, petroProd, petroImp, gasCons, netHosts, airports, gasProd  
+3. Factor 3 related to birth, infant, life, fert, GDPcapita  
+4. Factor 4 related to area, gasProd, gasCons  
+5. No variable assigned to factor 5  
+
+## Variable and Factor for Canonical Correlation Analysis
+Find relationships between demographic and economic factors
+
+- demography: pop, birth, infant, life, fert
+- economy: GDP, GDPgrowth, labor, tax, budget, exports, imports
+
+Use data that has been preprocessed above
+```{r var_cc}
+demo_var <- c('pop', 'birth', 'infant', 'life', 'fert')
+eco_var <- c('GDP', 'GDPgrowth', 'labor', 'tax', 'budget', 'exports', 'imports')
+
+demo_df <- df[,demo_var]
+eco_df <- df[,eco_var]
+```
+
+## Test Relationships in Canonical Variate
+Before interpreting canonical correlations, let see if the relationships between canonical pairs is significant. Statistical test to be used is Wilks.
+```{r cca_test}
+ccor <- cc(demo_df, eco_df)
+p.asym(ccor$cor, nrow(demo_df), ncol(demo_df), ncol(eco_df))
+```
+turns out only two canonical pairs from five that have correlations
+
+## Canonical Correlation
+```{r cca}
+ccor$cor
+```
+98.67% variation is explained by first canonical pair  
+63.29% variation is explained by second canonical pair  
+canonical pairs from 3 to 5 is not to be interpreted
+
+Canonical coefficients for demographic factors can be seen below
+```{r echo=F}
+ccor$xcoef[,c(1,2)]
+```
+
+Canonical coefficients for economic factors can be seen below
+```{r echo=F}
+ccor$ycoef[,c(1,2)]
+```
